@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 LED Remote</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+:root{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#172033;background:#f3f6fb}
+*{box-sizing:border-box}body{margin:0;padding:24px 14px 40px}
+main{max-width:680px;margin:auto}.panel{background:white;border:1px solid #e1e7f0;border-radius:18px;padding:20px;margin:14px 0;box-shadow:0 5px 20px #1720330a}
+h1{font-size:27px;margin:0 0 6px}.muted{color:#65718a;font-size:14px}.status{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:30px;background:#eef1f6;font-size:14px;font-weight:650}
+.dot{width:9px;height:9px;border-radius:50%;background:#9aa4b2}.connected .dot{background:#16a34a}.error .dot{background:#dc2626}
+label{display:block;font-size:13px;font-weight:650;margin:13px 0 5px}input{width:100%;padding:12px;border:1px solid #ccd5e2;border-radius:10px;font:inherit}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.btn{border:0;border-radius:12px;padding:17px 12px;color:white;font-size:18px;font-weight:750;cursor:pointer}.btn:disabled{opacity:.4;cursor:not-allowed}.on{background:#16a34a}.off{background:#dc2626}.connect{background:#2457d6}.disconnect{background:#596579}
+.small{font-size:12px;color:#68758b;line-height:1.5}.log{background:#101827;color:#d8e2f0;border-radius:10px;padding:12px;min-height:70px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px ui-monospace,monospace}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.led{font-size:24px;font-weight:800}.led.onstate{color:#16a34a}.led.offstate{color:#dc2626}
+@media(max-width:420px){body{padding:16px 10px}.panel{padding:16px}.grid{gap:8px}}
+</style>
+</head>
+<body>
+<main>
+  <section class="panel">
+    <h1>ESP32 LED Remote</h1>
+    <p class="muted">Control your ESP32 LED through your CrystalMQ MQTT broker.</p>
+    <div id="connectionStatus" class="status"><span class="dot"></span><span id="connectionText">Not connected</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>MQTT connection</h2>
+    <p class="small">Enter the broker credentials shown in your CrystalMQ dashboard. The password is only held in this page while it is open.</p>
+    <label for="broker">WebSocket broker URL</label>
+    <input id="broker" value="ws://crystalmq.bevywise.com:10443" autocomplete="url">
+    <label for="username">MQTT username</label>
+    <input id="username" placeholder="Your CrystalMQ username" autocomplete="username">
+    <label for="password">MQTT password</label>
+    <input id="password" type="password" placeholder="Your CrystalMQ password" autocomplete="current-password">
+    <label for="clientId">Client ID</label>
+    <input id="clientId" value="web-led-control" autocomplete="off">
+    <div class="grid" style="margin-top:16px">
+      <button id="connectBtn" class="btn connect" onclick="connectBroker()">Connect</button>
+      <button id="disconnectBtn" class="btn disconnect" onclick="disconnectBroker()" disabled>Disconnect</button>
+    </div>
+    <p class="small">This default uses the non-TLS WebSocket port 10443 shown in your dashboard. Use it for initial testing only. For a public HTTPS website, ask Bevywise for the secure WebSocket (WSS) endpoint and port before publishing.</p>
+  </section>
+
+  <section class="panel">
+    <h2>LED control</h2>
+    <label for="topic">Command topic</label>
+    <input id="topic" value="home/esp32/led/set">
+    <div class="grid" style="margin-top:14px">
+      <button id="onBtn" class="btn on" onclick="sendCommand('ON')" disabled>LED ON</button>
+      <button id="offBtn" class="btn off" onclick="sendCommand('OFF')" disabled>LED OFF</button>
+    </div>
+    <div class="row" style="margin-top:18px">
+      <span class="muted">Last command sent</span>
+      <span id="lastCommand" class="led">—</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Connection log</h2>
+    <div id="log" class="log">Ready. Enter your MQTT credentials and connect.</div>
+  </section>
+  <p class="small">Keep your MQTT credentials private. Do not publish a webpage containing a shared permanent MQTT username/password. Anyone who can inspect a public webpage can retrieve credentials entered directly into its source.</p>
+</main>
+<script>
+let mqttClient = null;
+const $ = id => document.getElementById(id);
+function log(message){
+  const el = $("log");
+  const time = new Date().toLocaleTimeString();
+  el.textContent = `[${time}] ${message}\n` + el.textContent;
+}
+function setConnection(state, message){
+  $("connectionStatus").className = "status " + state;
+  $("connectionText").textContent = message;
+  const ready = state === "connected";
+  $("onBtn").disabled = !ready;
+  $("offBtn").disabled = !ready;
+  $("disconnectBtn").disabled = !mqttClient || !mqttClient.connected;
+  $("connectBtn").disabled = !!mqttClient && mqttClient.connected;
+}
+function connectBroker(){
+  if(!window.mqtt){ log("MQTT.js did not load. Check your internet connection."); return; }
+  const url = $("broker").value.trim();
+  const username = $("username").value.trim();
+  const password = $("password").value;
+  const clientId = $("clientId").value.trim() || ("web-led-" + Math.random().toString(16).slice(2,10));
+  if(!url || !username || !password){ alert("Enter the broker URL, username and password."); return; }
+  if(mqttClient){ mqttClient.end(true); mqttClient = null; }
+  setConnection("", "Connecting…");
+  log("Connecting to " + url);
+  try{
+    mqttClient = mqtt.connect(url, {
+      clientId, username, password,
+      clean: true, connectTimeout: 10000, reconnectPeriod: 3000,
+      keepalive: 30
+    });
+    mqttClient.on("connect", () => { setConnection("connected", "Connected to CrystalMQ"); log("Connected successfully."); });
+    mqttClient.on("reconnect", () => { setConnection("", "Reconnecting…"); log("Trying to reconnect…"); });
+    mqttClient.on("close", () => { setConnection("", "Disconnected"); log("Connection closed."); });
+    mqttClient.on("error", err => { setConnection("error", "Connection error"); log("Error: " + err.message); });
+  }catch(err){ setConnection("error", "Connection error"); log("Error: " + err.message); }
+}
+function disconnectBroker(){
+  if(mqttClient){ mqttClient.end(true); mqttClient = null; }
+  setConnection("", "Not connected");
+  log("Disconnected by user.");
+}
+function sendCommand(command){
+  if(!mqttClient || !mqttClient.connected){ alert("Connect to CrystalMQ first."); return; }
+  const topic = $("topic").value.trim();
+  if(!topic){ alert("Enter the command topic."); return; }
+  mqttClient.publish(topic, command, {qos:0, retain:false}, err => {
+    if(err){ log("Publish failed: " + err.message); return; }
+    $("lastCommand").textContent = command;
+    $("lastCommand").className = "led " + (command === "ON" ? "onstate" : "offstate");
+    log("Sent " + command + " to topic " + topic);
+  });
+}
+</script>
+</body>
+</html>
